@@ -6,7 +6,7 @@ const client = new Client({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
 });
 
-const DISCORD_TOKEN = 'MTQwNTQzMDE3Nzk1NzI4MTgyMw.GFWaz_.5VaXwUUOn2i0DtsUgeA-THhM8YRqui0PpjKizo';
+const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 
 // Cache: lưu metadata trong RAM
 const cache = new Map();
