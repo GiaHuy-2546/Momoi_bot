@@ -66,10 +66,11 @@ async function handleFacebookVideo(url, message) {
 
         // 3. Regex tìm link MP4 (ưu tiên HD)
         let match =
-            html.match(/"hd_src_no_ratelimit":"(https:\\/\\/[^"]+?\.mp4[^"]*)"/) ||
-            html.match(/"sd_src_no_ratelimit":"(https:\\/\\/[^"]+?\.mp4[^"]*)"/) ||
-            html.match(/"hd_src":"(https:\\/\\/[^"]+?\.mp4[^"]*)"/) ||
-            html.match(/"sd_src":"(https:\\/\\/[^"]+?\.mp4[^"]*)"/);
+            html.match(new RegExp('"hd_src_no_ratelimit":"(https:\\/\\/[^"]+?\\.mp4[^"]*)"', '')) ||
+            html.match(new RegExp('"sd_src_no_ratelimit":"(https:\\/\\/[^"]+?\\.mp4[^"]*)"', '')) ||
+            html.match(new RegExp('"hd_src":"(https:\\/\\/[^"]+?\\.mp4[^"]*)"', '')) ||
+            html.match(new RegExp('"sd_src":"(https:\\/\\/[^"]+?\\.mp4[^"]*)"', ''));
+
 
         // 4. Nếu không có video → thử lấy ảnh
         if (!match) {
