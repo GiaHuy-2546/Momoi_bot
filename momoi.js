@@ -3,12 +3,14 @@ import axios from 'axios';
 import fs from 'fs';
 import path from 'path';
 import ffmpeg from 'fluent-ffmpeg';
+import { exec } from 'child_process';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
+const MAX_DISCORD_FILE = 8 * 1024 * 1024; // 8MB cho free (đổi thành 25MB nếu Nitro)
 
 if (!DISCORD_TOKEN) {
     console.error('❌ Thiếu DISCORD_TOKEN.');
@@ -18,8 +20,6 @@ if (!DISCORD_TOKEN) {
 const tempDir = path.join(__dirname, 'temp');
 if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir);
 
-const MAX_DISCORD_FILE = 8 * 1024 * 1024; // 8MB cho Discord free
-
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
@@ -28,102 +28,109 @@ const client = new Client({
     ],
 });
 
-// Hàm nén video với bitrate cho trước
-async function compressVideo(videoUrl, outputFile, bitrate) {
-    return new Promise((resolve, reject) => {
-        ffmpeg(videoUrl)
-            .setStartTime(0)
-            .setDuration(30) // chỉ lấy 30 giây đầu
-            .videoCodec('libx264')
-            .size('?x720') // giữ HD nhưng scale theo tỉ lệ
-            .videoBitrate(`${bitrate}k`)
-            .outputOptions('-preset veryfast')
-            .output(outputFile)
-            .on('end', () => resolve(outputFile))
-            .on('error', reject)
-            .run();
-    });
-}
-
-// Tải và nén video cho đến khi đủ nhỏ
-async function downloadAndAutoCompress(videoUrl, baseName) {
-    let bitrate = 800; // kbps ban đầu
-    for (let attempt = 1; attempt <= 5; attempt++) {
-        const outPath = path.join(tempDir, `${baseName}_try${attempt}.mp4`);
-        await compressVideo(videoUrl, outPath, bitrate);
-
-        const size = fs.statSync(outPath).size;
-        if (size <= MAX_DISCORD_FILE) {
-            return outPath; // thành công
-        }
-
-        fs.unlinkSync(outPath); // xoá file lớn quá
-        bitrate = Math.max(200, Math.floor(bitrate * 0.8)); // giảm 20%, tối thiểu 200kbps
-    }
-    return null; // thất bại
-}
-
-// Hàm xử lý video Facebook (có xoá file tạm khi lỗi)
-async function handleFacebookVideo(message, url) {
-    console.log(`📘 Phát hiện Facebook video: ${url}`);
-    const tempFiles = [];
-
+// ================== Xử lý Facebook Video ==================
+async function handleFacebookVideo(url, message) {
     try {
-        const res = await axios.get(
-            `https://fdown.net/download.php?URL=${encodeURIComponent(url)}`,
-            {
-                headers: { 'User-Agent': 'Mozilla/5.0' },
-                timeout: 15000
+        console.log(`📘 Phát hiện Facebook video: ${url}`);
+
+        // 1. Nếu là link /share/v/... thì tìm link gốc
+        if (/facebook\.com\/share\/v\//.test(url)) {
+            console.log("🔍 Đang tìm link gốc từ trang share...");
+            const res = await axios.get(url, {
+                headers: {
+                    "User-Agent": "Mozilla/5.0",
+                    "Accept-Language": "en-US,en;q=0.9",
+                },
+                maxRedirects: 5,
+            });
+
+            const html = res.data;
+            const match = html.match(/https:\/\/www\.facebook\.com\/[^"']+\/videos\/\d+/);
+            if (match) {
+                url = match[0];
+                console.log("➡️ Link gốc:", url);
+            } else {
+                console.warn("⚠️ Không tìm thấy link gốc từ trang share.");
             }
-        );
+        }
 
-        const match = res.data.match(/https:\/\/.*?\.mp4/);
-        if (!match) throw new Error("No MP4 found");
-
-        const videoUrl = match[0];
-        const baseName = `fb_${Date.now()}`;
-        
-        const outPath = await downloadAndAutoCompress(videoUrl, baseName);
-        if (!outPath) throw new Error("Không thể nén video đủ nhỏ cho Discord");
-        tempFiles.push(outPath);
-
-        await message.reply({
-            content: `🎬 Video từ Facebook\n🔗 ${url}`,
-            files: [outPath]
+        // 2. Lấy HTML từ link video gốc
+        const res = await axios.get(url, {
+            headers: {
+                "User-Agent": "Mozilla/5.0",
+                "Accept-Language": "en-US,en;q=0.9",
+            },
+            maxRedirects: 5,
         });
+
+        const html = res.data;
+
+        // 3. Regex tìm link MP4
+        let match =
+            html.match(/"hd_src_no_ratelimit":"(https:\\/\\/[^"]+\.mp4[^"]*)"/) ||
+            html.match(/"sd_src_no_ratelimit":"(https:\\/\\/[^"]+\.mp4[^"]*)"/) ||
+            html.match(/"hd_src":"(https:\\/\\/[^"]+\.mp4[^"]*)"/) ||
+            html.match(/"sd_src":"(https:\\/\\/[^"]+\.mp4[^"]*)"/);
+
+        if (!match) {
+            console.error("❌ Không tìm thấy link MP4 trong HTML");
+            await message.channel.send(`📷 Không có video, gửi ảnh từ link này: ${url}`);
+            return;
+        }
+
+        let videoUrl = match[1].replace(/\\/g, "");
+        console.log("🎯 Lấy được video:", videoUrl);
+
+        // 4. Kiểm tra dung lượng video
+        const head = await axios.head(videoUrl, { maxRedirects: 5 });
+        const size = parseInt(head.headers["content-length"] || "0", 10);
+        console.log("📏 Kích thước video:", size, "bytes");
+
+        // 5. Tải video xuống file tạm
+        const tempPath = path.join(tempDir, `fbvideo_${Date.now()}.mp4`);
+        const writer = fs.createWriteStream(tempPath);
+        const downloadRes = await axios.get(videoUrl, { responseType: "stream" });
+        downloadRes.data.pipe(writer);
+        await new Promise((resolve, reject) => {
+            writer.on("finish", resolve);
+            writer.on("error", reject);
+        });
+
+        let finalPath = tempPath;
+
+        // 6. Nếu file lớn hơn giới hạn → nén lại
+        if (size > MAX_DISCORD_FILE) {
+            console.log("📦 Video lớn hơn giới hạn → Đang nén lại...");
+            const compressedPath = path.join(tempDir, `fbvideo_compressed_${Date.now()}.mp4`);
+
+            await new Promise((resolve, reject) => {
+                exec(
+                    `ffmpeg -y -i "${tempPath}" -vf "scale=1280:-2" -b:v 800k -c:a aac -b:a 128k "${compressedPath}"`,
+                    (err) => {
+                        if (err) return reject(err);
+                        resolve();
+                    }
+                );
+            });
+
+            fs.unlinkSync(tempPath);
+            finalPath = compressedPath;
+        }
+
+        // 7. Gửi video lên Discord
+        await message.channel.send({
+            content: `🎥 Video từ Facebook:`,
+            files: [finalPath],
+        });
+
+        fs.unlinkSync(finalPath);
     } catch (err) {
-        console.error(`❌ Lỗi khi xử lý video Facebook:`, err.message);
-
-        // Fallback: gửi ảnh thumbnail
-        try {
-            const ogUrl = `https://opengraph.io/api/1.1/site/${encodeURIComponent(url)}?app_id=${process.env.OPENGRAPH_TOKEN}`;
-            const ogRes = await axios.get(ogUrl, { timeout: 10000 });
-            const ogData = ogRes.data?.openGraph || {};
-            if (ogData.image?.url) {
-                return await message.reply({
-                    content: `🖼 Ảnh từ bài Facebook\n🔗 ${url}`,
-                    files: [ogData.image.url]
-                });
-            }
-        } catch (e) {
-            console.error("❌ Lỗi khi lấy ảnh OG:", e.message);
-        }
-
-        await message.reply(`ℹ Không thể lấy video hoặc ảnh từ: ${url}`);
-    } finally {
-        // Xoá tất cả file tạm đã tạo
-        for (const file of tempFiles) {
-            try {
-                if (fs.existsSync(file)) fs.unlinkSync(file);
-            } catch (e) {
-                console.error(`⚠ Lỗi khi xoá file tạm ${file}:`, e.message);
-            }
-        }
+        console.error("❌ Lỗi khi xử lý video Facebook:", err.message);
+        await message.channel.send(`Không thể xử lý video từ: ${url}`);
     }
 }
 
-
-
+// ================== Bot Message Event ==================
 client.on('messageCreate', async (message) => {
     if (message.author.bot) return;
 
@@ -137,7 +144,7 @@ client.on('messageCreate', async (message) => {
                 url = url.split('/p/')[0];
                 console.log(`✂ Đã cắt link: ${url}`);
             }
-            await handleFacebookVideo(message, url);
+            await handleFacebookVideo(url, message);
         }
     }
 });
