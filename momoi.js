@@ -1,5 +1,4 @@
 // bot.js
-import 'dotenv/config';
 import { Client, GatewayIntentBits } from 'discord.js';
 import axios from 'axios';
 import ffmpeg from 'fluent-ffmpeg';
