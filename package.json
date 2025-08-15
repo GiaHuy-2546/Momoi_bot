@@ -1,17 +1,15 @@
 {
   "name": "momoi-bot",
   "version": "1.0.0",
-  "description": "Discord bot lấy metadata Facebook, hỗ trợ video và ảnh, tự cắt video >25MB",
+  "type": "module",
   "main": "momoi.js",
   "scripts": {
     "start": "node momoi.js"
   },
-  "engines": {
-    "node": ">=18"
-  },
   "dependencies": {
     "axios": "^1.6.0",
-    "discord.js": "^14.15.0",
+    "discord.js": "^14.15.3",
+    "ffmpeg-static": "^5.2.0",
     "fluent-ffmpeg": "^2.1.2"
   }
 }
