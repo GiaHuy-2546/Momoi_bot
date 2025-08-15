@@ -92,9 +92,26 @@ async function fetchFacebookVideoAndImage(url) {
         const page = await browser.newPage();
         await page.setUserAgent('Mozilla/5.0');
         await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+
+        // Cuộn xuống để load ảnh
+        await page.evaluate(async () => {
+            await new Promise((resolve) => {
+                let totalHeight = 0;
+                const distance = 400;
+                const timer = setInterval(() => {
+                    window.scrollBy(0, distance);
+                    totalHeight += distance;
+                    if (totalHeight >= document.body.scrollHeight) {
+                        clearInterval(timer);
+                        resolve();
+                    }
+                }, 300);
+            });
+        });
+
         await new Promise(r => setTimeout(r, 2000));
 
-        // Lấy link video
+        // Lấy link video nếu có
         videoUrl = await page.evaluate(() => {
             const vid = document.querySelector('video');
             if (vid?.src) return vid.src;
@@ -106,11 +123,17 @@ async function fetchFacebookVideoAndImage(url) {
             return null;
         });
 
-        // Nếu không có video → lấy ảnh meta
+        // Nếu không có video → tìm ảnh
         if (!videoUrl) {
             imageUrl = await page.evaluate(() => {
+                // Thử lấy meta og:image trước
                 const meta = document.querySelector('meta[property="og:image"]');
-                return meta ? meta.content : null;
+                if (meta && meta.content && !meta.content.includes('facebook.com/images')) {
+                    return meta.content;
+                }
+                // Nếu meta rác (logo FB) → tìm ảnh trong nội dung bài
+                const img = document.querySelector('img[src*="scontent"]');
+                return img ? img.src : null;
             });
         }
 
@@ -122,6 +145,7 @@ async function fetchFacebookVideoAndImage(url) {
 
     return { videoUrl, imageUrl };
 }
+
 
 async function sendVideo(message, videoUrl) {
     try {
