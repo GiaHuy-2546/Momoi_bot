@@ -1,11 +1,10 @@
 // momoi.js
-import 'dotenv/config';
+
 import { Client, GatewayIntentBits } from 'discord.js';
 import axios from 'axios';
 import fs from 'fs';
 import path from 'path';
 import ffmpeg from 'fluent-ffmpeg';
-import fetch from 'node-fetch';
 
 // Lấy token từ biến môi trường Railway
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
