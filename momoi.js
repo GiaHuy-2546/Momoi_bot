@@ -1,77 +1,23 @@
-const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
-const axios = require('axios');
-const fs = require('fs');
-const path = require('path');
-const ffmpeg = require('fluent-ffmpeg');
+// bot.js
+import 'dotenv/config';
+import { Client, GatewayIntentBits } from 'discord.js';
+import axios from 'axios';
+import ffmpeg from 'fluent-ffmpeg';
+import fs from 'fs';
+import path from 'path';
+import fetch from 'node-fetch';
 
+// Lấy token từ biến môi trường
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
-const OPENGRAPH_API_KEY = process.env.OPENGRAPH_API_KEY;
-
-if (!DISCORD_TOKEN || !OPENGRAPH_API_KEY) {
-    console.error("❌ Bạn cần đặt DISCORD_TOKEN và OPENGRAPH_API_KEY trong Railway Variables!");
-    process.exit(1);
-}
+const OPENGRAPH_TOKEN = process.env.OPENGRAPH_TOKEN;
 
 const client = new Client({
-    intents: [
-        GatewayIntentBits.Guilds,
-        GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent
-    ]
+    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
 });
-
-console.log("🚀 Bot starting...");
 
 client.once('ready', () => {
-    console.log(`🤖 Bot đã đăng nhập thành công dưới tên: ${client.user.tag}`);
+    console.log(`✅ Bot đã đăng nhập với tên ${client.user.tag}`);
 });
-
-async function sendVideo(message, url, videoBuffer) {
-    const tempPath = path.join(__dirname, 'temp_video.mp4');
-    fs.writeFileSync(tempPath, videoBuffer);
-
-    let fileSize = fs.statSync(tempPath).size / (1024 * 1024); // MB
-
-    if (fileSize <= 25) {
-        await message.channel.send({ content: `🎥 Video từ: ${url}`, files: [tempPath] });
-        fs.unlinkSync(tempPath);
-        return;
-    }
-
-    // Video > 25MB → tự cắt giảm bitrate
-    const targetSizeMB = 24; // để an toàn < 25MB
-    const durationSec = await new Promise((resolve, reject) => {
-        ffmpeg.ffprobe(tempPath, (err, metadata) => {
-            if (err) reject(err);
-            else resolve(metadata.format.duration);
-        });
-    });
-
-    const targetSizeBits = targetSizeMB * 1024 * 1024 * 8;
-    const targetBitrate = Math.floor(targetSizeBits / durationSec); // bps
-
-    const tempCropped = path.join(__dirname, 'temp_video_cropped.mp4');
-
-    await new Promise((resolve, reject) => {
-        ffmpeg(tempPath)
-            .videoBitrate(Math.floor(targetBitrate / 1000)) // kbps
-            .output(tempCropped)
-            .on('end', resolve)
-            .on('error', reject)
-            .run();
-    });
-
-    fileSize = fs.statSync(tempCropped).size / (1024 * 1024);
-
-    if (fileSize <= 25) {
-        await message.channel.send({ content: `🎥 Video từ: ${url} (đã cắt)`, files: [tempCropped] });
-    } else {
-        await message.channel.send(`🎥 Video quá lớn (${fileSize.toFixed(2)} MB), xem tại: ${url}`);
-    }
-
-    fs.unlinkSync(tempPath);
-    if (fs.existsSync(tempCropped)) fs.unlinkSync(tempCropped);
-}
 
 client.on('messageCreate', async (message) => {
     if (message.author.bot) return;
@@ -81,49 +27,125 @@ client.on('messageCreate', async (message) => {
 
     if (!urls) return;
 
-    for (const url of urls) {
-        console.log(`🔗 Phát hiện URL: ${url}`);
-
+    for (let url of urls) {
         try {
-            const apiUrl = `https://opengraph.io/api/1.1/site/${encodeURIComponent(url)}?app_id=${OPENGRAPH_API_KEY}`;
-            const res = await axios.get(apiUrl);
-
-            if (!res.data || !res.data.hybridGraph) {
-                console.log(`❌ Không lấy được metadata cho ${url}`);
-                continue;
+            // Nếu là link Facebook /p/... thì follow redirect
+            if (url.includes('facebook.com/share/p/')) {
+                url = await resolveRedirect(url);
             }
 
-            const data = res.data.hybridGraph;
-            const title = data.title || "Không có tiêu đề";
-            const description = data.description || "";
-            const image = data.image;
-            const video = data.video;
+            const meta = await getOpenGraph(url);
 
-            if (video) {
-                console.log(`🎥 Phát hiện video: ${video}`);
-                try {
-                    const videoRes = await axios.get(video, { responseType: 'arraybuffer' });
-                    await sendVideo(message, url, videoRes.data);
-                } catch (err) {
-                    console.error(`❌ Lỗi tải video: ${err.message}`);
-                    await message.channel.send(`Không thể tải video từ: ${url}`);
-                }
+            if (meta.video) {
+                console.log(`🎥 Tìm thấy video: ${meta.video}`);
+                const videoBuffer = await downloadFile(meta.video);
+                await processVideo(message, url, videoBuffer);
+            } else if (meta.image) {
+                await message.channel.send({ content: `🖼 ${url}`, files: [meta.image] });
             } else {
-                const embed = new EmbedBuilder()
-                    .setTitle(title)
-                    .setURL(url)
-                    .setDescription(description)
-                    .setColor(0x00AE86);
-
-                if (image) embed.setImage(image);
-
-                await message.channel.send({ embeds: [embed] });
+                await message.channel.send(`ℹ️ Không tìm thấy media cho link này: ${url}`);
             }
 
         } catch (err) {
-            console.error(`❌ Lỗi xử lý ${url}: ${err.message}`);
+            console.error(err);
+            message.channel.send(`❌ Lỗi khi xử lý: ${url}`);
         }
     }
 });
+
+// --- Hàm follow redirect ---
+async function resolveRedirect(url) {
+    const res = await fetch(url, { redirect: 'follow' });
+    return res.url;
+}
+
+// --- Lấy dữ liệu từ OpenGraph.io ---
+async function getOpenGraph(url) {
+    const apiUrl = `https://opengraph.io/api/1.1/site/${encodeURIComponent(url)}?app_id=${OPENGRAPH_TOKEN}`;
+    const res = await axios.get(apiUrl);
+    const og = res.data.hybridGraph || {};
+    return {
+        title: og.title,
+        image: og.image,
+        video: og.video || og.videoUrl
+    };
+}
+
+// --- Download file ---
+async function downloadFile(url) {
+    const res = await axios.get(url, { responseType: 'arraybuffer' });
+    return Buffer.from(res.data);
+}
+
+// --- Xử lý video ---
+async function processVideo(message, url, buffer) {
+    const tempPath = path.join(process.cwd(), 'temp_video.mp4');
+    fs.writeFileSync(tempPath, buffer);
+
+    let size = fs.statSync(tempPath).size / (1024 * 1024);
+    if (size <= 25) {
+        await message.channel.send({ content: `🎥 ${url}`, files: [tempPath] });
+        fs.unlinkSync(tempPath);
+        return;
+    }
+
+    // Giảm bitrate
+    const duration = await getVideoDuration(tempPath);
+    const targetSizeBits = 24 * 1024 * 1024 * 8;
+    const targetBitrate = Math.floor(targetSizeBits / duration);
+    const compressedPath = path.join(process.cwd(), 'temp_video_compressed.mp4');
+
+    await new Promise((resolve, reject) => {
+        ffmpeg(tempPath)
+            .videoBitrate(Math.floor(targetBitrate / 1000))
+            .output(compressedPath)
+            .on('end', resolve)
+            .on('error', reject)
+            .run();
+    });
+
+    size = fs.statSync(compressedPath).size / (1024 * 1024);
+    if (size <= 25) {
+        await message.channel.send({ content: `🎥 ${url} (nén)`, files: [compressedPath] });
+        cleanupFiles([tempPath, compressedPath]);
+        return;
+    }
+
+    // Cắt 20 giây đầu
+    const croppedPath = path.join(process.cwd(), 'temp_video_cropped.mp4');
+    await new Promise((resolve, reject) => {
+        ffmpeg(compressedPath)
+            .setStartTime(0)
+            .setDuration(20)
+            .output(croppedPath)
+            .on('end', resolve)
+            .on('error', reject)
+            .run();
+    });
+
+    size = fs.statSync(croppedPath).size / (1024 * 1024);
+    if (size <= 25) {
+        await message.channel.send({ content: `🎥 ${url} (cắt 20s)`, files: [croppedPath] });
+    } else {
+        await message.channel.send(`📺 Video quá lớn (${size.toFixed(2)}MB): ${url}`);
+    }
+
+    cleanupFiles([tempPath, compressedPath, croppedPath]);
+}
+
+function getVideoDuration(filePath) {
+    return new Promise((resolve, reject) => {
+        ffmpeg.ffprobe(filePath, (err, metadata) => {
+            if (err) reject(err);
+            else resolve(metadata.format.duration);
+        });
+    });
+}
+
+function cleanupFiles(paths) {
+    for (const file of paths) {
+        if (fs.existsSync(file)) fs.unlinkSync(file);
+    }
+}
 
 client.login(DISCORD_TOKEN);
