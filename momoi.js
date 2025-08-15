@@ -63,58 +63,66 @@ async function downloadAndAutoCompress(videoUrl, baseName) {
     return null; // thất bại
 }
 
-// Hàm xử lý video Facebook
+// Hàm xử lý video Facebook (có xoá file tạm khi lỗi)
 async function handleFacebookVideo(message, url) {
+    console.log(`📘 Phát hiện Facebook video: ${url}`);
+    const tempFiles = [];
+
     try {
-        console.log(`📘 Phát hiện Facebook video: ${url}`);
-
-        // Gọi API fdown.net để lấy link mp4
-        const apiURL = `https://fdown.net/download.php?video=${encodeURIComponent(url)}`;
-        const res = await axios.get(apiURL, { timeout: 15000 });
-
-        const match = res.data.match(/https?:\/\/[^"]+\.mp4/);
-        if (!match) {
-            console.log(`ℹ Không có video, thử lấy ảnh từ OG: ${url}`);
-            try {
-                const ogUrl = `https://opengraph.io/api/1.1/site/${encodeURIComponent(url)}?app_id=${process.env.OPENGRAPH_TOKEN}`;
-                const ogRes = await axios.get(ogUrl, { timeout: 10000 });
-                const ogData = ogRes.data?.openGraph || {};
-                
-                if (ogData.image?.url) {
-                    return message.reply({
-                        content: `🖼 Ảnh từ bài Facebook\n🔗 ${url}`,
-                        files: [ogData.image.url]
-                    });
-                } else {
-                    return message.reply(`ℹ Không tìm thấy video hoặc ảnh từ Facebook.\n🔗 ${url}`);
-                }
-            } catch (err) {
-                console.error(`❌ Lỗi khi lấy ảnh OG:`, err.message);
-                return message.reply(`ℹ Không tìm thấy video hoặc ảnh từ Facebook.\n🔗 ${url}`);
+        const res = await axios.get(
+            `https://fdown.net/download.php?URL=${encodeURIComponent(url)}`,
+            {
+                headers: { 'User-Agent': 'Mozilla/5.0' },
+                timeout: 15000
             }
-        }
-        
+        );
+
+        const match = res.data.match(/https:\/\/.*?\.mp4/);
+        if (!match) throw new Error("No MP4 found");
 
         const videoUrl = match[0];
         const baseName = `fb_${Date.now()}`;
-
-        const finalPath = await downloadAndAutoCompress(videoUrl, baseName);
-
-        if (!finalPath) {
-            return message.reply(`⚠ Video quá lớn và không thể nén đủ nhỏ để gửi.\n🔗 ${url}`);
-        }
+        
+        const outPath = await downloadAndAutoCompress(videoUrl, baseName);
+        if (!outPath) throw new Error("Không thể nén video đủ nhỏ cho Discord");
+        tempFiles.push(outPath);
 
         await message.reply({
-            content: `🎬 Video Facebook từ: ${url}`,
-            files: [finalPath]
+            content: `🎬 Video từ Facebook\n🔗 ${url}`,
+            files: [outPath]
         });
-
-        fs.unlinkSync(finalPath);
     } catch (err) {
         console.error(`❌ Lỗi khi xử lý video Facebook:`, err.message);
-        message.reply(`❌ Không thể xử lý video từ Facebook.\n🔗 ${url}`);
+
+        // Fallback: gửi ảnh thumbnail
+        try {
+            const ogUrl = `https://opengraph.io/api/1.1/site/${encodeURIComponent(url)}?app_id=${process.env.OPENGRAPH_TOKEN}`;
+            const ogRes = await axios.get(ogUrl, { timeout: 10000 });
+            const ogData = ogRes.data?.openGraph || {};
+            if (ogData.image?.url) {
+                return await message.reply({
+                    content: `🖼 Ảnh từ bài Facebook\n🔗 ${url}`,
+                    files: [ogData.image.url]
+                });
+            }
+        } catch (e) {
+            console.error("❌ Lỗi khi lấy ảnh OG:", e.message);
+        }
+
+        await message.reply(`ℹ Không thể lấy video hoặc ảnh từ: ${url}`);
+    } finally {
+        // Xoá tất cả file tạm đã tạo
+        for (const file of tempFiles) {
+            try {
+                if (fs.existsSync(file)) fs.unlinkSync(file);
+            } catch (e) {
+                console.error(`⚠ Lỗi khi xoá file tạm ${file}:`, e.message);
+            }
+        }
     }
 }
+
+
 
 client.on('messageCreate', async (message) => {
     if (message.author.bot) return;

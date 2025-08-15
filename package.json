@@ -1,15 +1,16 @@
 {
-  "name": "momoi-bot",
+  "name": "facebook-video-discord-bot",
   "version": "1.0.0",
-  "type": "module",
-  "main": "momoi.js",
+  "main": "bot.js",
+  "license": "MIT",
   "scripts": {
-    "start": "node momoi.js"
+    "start": "node bot.js"
   },
   "dependencies": {
     "axios": "^1.6.0",
-    "discord.js": "^14.15.3",
+    "discord.js": "^14.11.0",
     "ffmpeg-static": "^5.2.0",
-    "fluent-ffmpeg": "^2.1.2"
+    "fluent-ffmpeg": "^2.1.2",
+    "dotenv": "^16.0.3"
   }
 }
