@@ -1,6 +1,7 @@
 {
   "name": "facebook-video-discord-bot",
   "version": "1.0.0",
+  "type": "module",
   "main": "momoi.js",
   "license": "MIT",
   "scripts": {
