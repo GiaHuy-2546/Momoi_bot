@@ -39,6 +39,32 @@ function sanitizeUrl(u) {
     }
 }
 
+// ================== Tìm link gốc từ trang share ==================
+async function getOriginalFacebookLink(shareUrl) {
+    if (!/facebook\.com\/share\/[vp]\//.test(shareUrl)) return shareUrl;
+    try {
+        console.log("🔍 Đang tìm link gốc từ trang share...");
+        const res = await axios.get(shareUrl, {
+            headers: {
+                "User-Agent": "Mozilla/5.0",
+                "Accept-Language": "en-US,en;q=0.9",
+            },
+            maxRedirects: 5,
+        });
+        const html = res.data;
+        const match = html.match(/https:\/\/www\.facebook\.com\/[^"']+\/videos\/\d+/);
+        if (match) {
+            console.log("➡️ Link gốc:", match[0]);
+            return match[0];
+        }
+        console.warn("⚠️ Không tìm thấy link gốc từ trang share.");
+        return shareUrl;
+    } catch (err) {
+        console.error("❌ Lỗi khi tìm link gốc:", err.message);
+        return shareUrl;
+    }
+}
+
 async function fetchPreviewImage(url) {
     try {
         const res = await axios.get(`https://opengraph.io/api/1.1/site/${encodeURIComponent(url)}`, {
@@ -52,21 +78,26 @@ async function fetchPreviewImage(url) {
     }
 }
 
-async function fetchFacebookVideo(url) {
+// ================== Puppeteer lấy video và ảnh ==================
+async function fetchFacebookVideoAndImage(url) {
     const browser = await puppeteer.launch({
         headless: 'new',
         args: ['--no-sandbox', '--disable-setuid-sandbox']
     });
 
+    let videoUrl = null;
+    let imageUrl = null;
+
     try {
         const page = await browser.newPage();
         await page.setUserAgent('Mozilla/5.0');
         await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
-        await page.waitForTimeout(2000);
+        await new Promise(r => setTimeout(r, 2000));
 
-        const videoUrl = await page.evaluate(() => {
-            const hd = document.querySelector('video')?.src;
-            if (hd) return hd;
+        // Lấy link video
+        videoUrl = await page.evaluate(() => {
+            const vid = document.querySelector('video');
+            if (vid?.src) return vid.src;
             const scripts = Array.from(document.querySelectorAll('script')).map(s => s.innerText);
             for (let script of scripts) {
                 const match = script.match(/https:\\\/\\\/[^"]+\.mp4/);
@@ -75,13 +106,21 @@ async function fetchFacebookVideo(url) {
             return null;
         });
 
-        return videoUrl;
+        // Nếu không có video → lấy ảnh meta
+        if (!videoUrl) {
+            imageUrl = await page.evaluate(() => {
+                const meta = document.querySelector('meta[property="og:image"]');
+                return meta ? meta.content : null;
+            });
+        }
+
     } catch (err) {
         console.error('❌ Puppeteer error:', err.message);
-        return null;
     } finally {
         await browser.close();
     }
+
+    return { videoUrl, imageUrl };
 }
 
 async function sendVideo(message, videoUrl) {
@@ -131,21 +170,31 @@ async function sendVideo(message, videoUrl) {
 }
 
 async function handleFacebookLink(url, message) {
+    // Bước 1: chuẩn hóa URL
     url = sanitizeUrl(url);
+    // Bước 2: nếu là link share thì tìm link gốc
+    url = await getOriginalFacebookLink(url);
+
     console.log(`📘 Xử lý: ${url}`);
 
-    const videoUrl = await fetchFacebookVideo(url);
+    const { videoUrl, imageUrl } = await fetchFacebookVideoAndImage(url);
 
     if (videoUrl) {
         console.log("🎯 Lấy được video:", videoUrl);
         await sendVideo(message, videoUrl);
+    } else if (imageUrl) {
+        console.log("📷 Lấy được ảnh trực tiếp:", imageUrl);
+        await message.channel.send({
+            content: `📷 Ảnh xem trước:`,
+            files: [imageUrl],
+        });
     } else {
-        console.log("📷 Không có video → lấy ảnh");
-        const imageUrl = await fetchPreviewImage(url);
-        if (imageUrl) {
+        console.log("📷 Thử OpenGraph.io...");
+        const ogImage = await fetchPreviewImage(url);
+        if (ogImage) {
             await message.channel.send({
-                content: `📷 Ảnh xem trước:`,
-                files: [imageUrl],
+                content: `📷 Ảnh xem trước (OpenGraph):`,
+                files: [ogImage],
             });
         } else {
             await message.channel.send(`❌ Không tìm thấy video hoặc ảnh từ: ${url}`);
